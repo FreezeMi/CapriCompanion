@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import ctypes
 import os
-import re
 import sys
 import time
+from dataclasses import replace
 from typing import Callable, Iterator
 
 from PySide6.QtCore import QEvent, QLockFile, QObject, QPoint, QProcess, QRectF, Qt, QThread, QTimer, Signal
@@ -15,7 +15,6 @@ from PySide6.QtGui import (
     QActionGroup,
     QColor,
     QFont,
-    QFontDatabase,
     QGuiApplication,
     QIcon,
     QKeySequence,
@@ -28,11 +27,9 @@ from PySide6.QtWidgets import (
     QApplication,
     QFrame,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QLineEdit,
     QMenu,
-    QMessageBox,
     QScrollArea,
     QSystemTrayIcon,
     QToolButton,
@@ -40,7 +37,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import cloud, storage, web
+from . import cloud, storage, theme, web
 from .character import CharacterView
 from .chat import (
     LOCAL_SITUATION,
@@ -53,29 +50,33 @@ from .chat import (
 )
 from .config import (
     ASSETS,
+    CLAUDE_RELOAD,
     DATA,
+    LOCAL_RELOAD,
     PERSONALITY_FILE,
     ROOT,
-    SETTINGS_FILE,
+    VOICE_RELOAD,
     Settings,
+    fit_history,
     load_personality,
     load_settings,
     save_settings,
 )
 from .effects import EFFECTS, PITCHES
 from .engine import Engine
+from .settings_window import BRAVE_KEY, CLAUDE_KEY, CLAUDE_MODELS, SettingsChange, SettingsWindow
+from .theme import ACCENT, MUTED, TEXT
 from .voice import PREVIEW, VOICES, Speaker, SpeechChunker, reveal_position
 
 NAME = "Capri"
-ACCENT = "#ff2d55"
-TEXT = "#f4f4f8"
-MUTED = "#8b8b9a"
 PANEL = QColor(18, 16, 26, 238)
 BUBBLE_WIDTH = 330
 BUBBLE_AREA = 250  # space kept free above the character for the speech bubble
 INPUT_WIDTH = 290
 INPUT_HEIGHT = 36
 CONNECTING = "Connecting to Claude…"
+WAKING = "Waking up…"
+LOCAL_ON = "Okay, I'm using my local brain now. Nothing leaves this PC unless you use 🌐."
 
 
 class EngineStarter(QThread):
@@ -308,6 +309,8 @@ class CompanionWindow(QWidget):
         self.reply_look_up = False
         self.waiting_for_local = False  # Claude couldn't answer; the local brain will
         self.fallback_note = ""
+        self.wake_note = ""  # what she says once awake again after saving settings
+        self.settings_window: SettingsWindow | None = None
         self.quitting = False
         self.reply_raw = ""
         self.pending_text = ""
@@ -384,8 +387,7 @@ class CompanionWindow(QWidget):
         row_layout.addWidget(self.input)
         row_layout.addWidget(self.web_button)
         layout.addWidget(input_row, 0, Qt.AlignmentFlag.AlignHCenter)
-        width = max(self.character.width(), BUBBLE_WIDTH, INPUT_WIDTH) + 8
-        self.setFixedSize(width, BUBBLE_AREA + self.character.height() + INPUT_HEIGHT + 12)
+        self._fit_size()
         self._place()
 
         self.hide_bubble = QTimer(self, singleShot=True)
@@ -403,7 +405,7 @@ class CompanionWindow(QWidget):
 
         self.character.sleeping()
         self.input.setEnabled(False)
-        self.input.setPlaceholderText("Waking up…")
+        self.input.setPlaceholderText(WAKING)
         key = storage.load_claude_key() if settings.brain == "claude" else None
         if settings.brain == "claude" and not key:
             settings.brain = "local"
@@ -420,17 +422,24 @@ class CompanionWindow(QWidget):
 
     @staticmethod
     def _load_font() -> QFont:
-        family = "Segoe UI"
-        font_file = ASSETS / "fonts" / "exo2" / "Exo2-Variable.ttf"
-        if font_file.is_file():
-            loaded = QFontDatabase.applicationFontFamilies(
-                QFontDatabase.addApplicationFont(str(font_file))
-            )
-            if loaded:
-                family = loaded[0]
-        font = QFont(family)
-        font.setPointSizeF(10.5)
-        return font
+        return theme.font(10.5)
+
+    def _fit_size(self) -> None:
+        width = max(self.character.width(), BUBBLE_WIDTH, INPUT_WIDTH) + 8
+        self.setFixedSize(width, BUBBLE_AREA + self.character.height() + INPUT_HEIGHT + 12)
+
+    def _resize_character(self, height: int) -> None:
+        """A new size for her, keeping her feet where they were."""
+        bottom, middle = self.geometry().bottom(), self.geometry().center().x()
+        self.character.set_height(height)
+        self._fit_size()
+        x, y = middle - self.width() // 2, bottom - self.height() + 1
+        screen = QGuiApplication.screenAt(QPoint(middle, bottom)) or QGuiApplication.primaryScreen()
+        area = screen.availableGeometry()
+        x = max(area.left(), min(x, area.right() - self.width() + 1))
+        y = max(area.top(), min(y, area.bottom() - self.height() + 1))
+        self.move(x, y)
+        storage.save_window_position(x, y)
 
     def _place(self) -> None:
         saved = storage.load_window_position()
@@ -445,8 +454,8 @@ class CompanionWindow(QWidget):
     def _build_menu(self) -> QMenu:
         menu = QMenu(self)
         menu.addAction("New conversation", self.new_conversation)
+        menu.addAction("Settings…", self.open_settings)
         menu.addAction("Edit personality…", lambda: self._open_file(PERSONALITY_FILE))
-        menu.addAction("Open settings…", self._open_settings)
         menu.addMenu(self._build_brain_menu(menu))
         menu.addMenu(self._build_voice_menu(menu))
         menu.addMenu(self._build_internet_menu(menu))
@@ -492,19 +501,44 @@ class CompanionWindow(QWidget):
         self.voice_action.setChecked(self.settings.voice_enabled)
         self.voice_action.toggled.connect(self.set_voice_enabled)
         menu.addAction(self.voice_action)
-        sync_action = QAction("Show text as she speaks", menu, checkable=True)
-        sync_action.setChecked(self.settings.text_with_voice)
-        sync_action.toggled.connect(self.set_text_with_voice)
-        menu.addAction(sync_action)
+        self.sync_action = QAction("Show text as she speaks", menu, checkable=True)
+        self.sync_action.setChecked(self.settings.text_with_voice)
+        self.sync_action.toggled.connect(self.set_text_with_voice)
+        menu.addAction(self.sync_action)
         menu.addSeparator()
-        self._add_choices(menu, VOICES, self.settings.voice, self.choose_voice)
+        self.voice_choices = self._add_choices(menu, VOICES, self.settings.voice, self.choose_voice)
         menu.addSeparator()
         effect_menu = menu.addMenu("Robot effect")
         labels = {label: value for value, label in EFFECTS.items()}
-        self._add_choices(effect_menu, labels, self.settings.voice_effect, self.choose_effect)
+        self.effect_choices = self._add_choices(
+            effect_menu, labels, self.settings.voice_effect, self.choose_effect
+        )
         pitch_menu = menu.addMenu("Pitch")
-        self._add_choices(pitch_menu, PITCHES, self.settings.voice_pitch, self.choose_pitch)
+        self.pitch_choices = self._add_choices(
+            pitch_menu, PITCHES, self.settings.voice_pitch, self.choose_pitch
+        )
+        menu.aboutToShow.connect(self._update_voice_menu)
         return menu
+
+    def _update_voice_menu(self) -> None:
+        for action, on in ((self.voice_action, self.settings.voice_enabled), (self.sync_action, self.settings.text_with_voice)):
+            action.blockSignals(True)
+            action.setChecked(on)
+            action.blockSignals(False)
+        for group, current in (
+            (self.voice_choices, self.settings.voice),
+            (self.effect_choices, self.settings.voice_effect),
+            (self.pitch_choices, self.settings.voice_pitch),
+        ):
+            self._tick(group, current)
+
+    @staticmethod
+    def _tick(group: QActionGroup, current) -> None:
+        """Ticks the option that matches the setting, or none when it's a custom value."""
+        group.setExclusionPolicy(QActionGroup.ExclusionPolicy.ExclusiveOptional)
+        for action in group.actions():
+            action.setChecked(action.data() == current)
+        group.setExclusionPolicy(QActionGroup.ExclusionPolicy.Exclusive)
 
     def _build_brain_menu(self, parent: QMenu) -> QMenu:
         menu = QMenu("Brain", parent)
@@ -514,13 +548,8 @@ class CompanionWindow(QWidget):
         brains = {"Local (private, on this PC)": "local", "Claude (online, your API key)": "claude"}
         self.brain_choices = self._add_choices(menu, brains, self.settings.brain, self.choose_brain)
         model_menu = menu.addMenu("Claude model")
-        models = {
-            "Haiku 5.5 (cheapest, fastest)": "claude-haiku-5-5",
-            "Sonnet 5.5 (smarter)": "claude-sonnet-5-5",
-            "Opus 5.5 (smartest, priciest)": "claude-opus-5-5",
-        }
         self.model_choices = self._add_choices(
-            model_menu, models, self.settings.claude_model, self.choose_claude_model
+            model_menu, CLAUDE_MODELS, self.settings.claude_model, self.choose_claude_model
         )
         search_menu = menu.addMenu("Claude searches the web")
         modes = {"Only when I ask (🌐 or Ctrl+Enter)": "globe", "Whenever it helps": "auto"}
@@ -539,8 +568,7 @@ class CompanionWindow(QWidget):
             (self.model_choices, self.settings.claude_model),
             (self.search_choices, self.settings.claude_search),
         ):
-            for action in group.actions():
-                action.setChecked(action.data() == current)
+            self._tick(group, current)
         if self._online():
             label = cloud.MODELS[self.settings.claude_model].label
             text = f"Using {label} · this session {cloud.dollars(self.cloud.session_cost)}"
@@ -572,6 +600,7 @@ class CompanionWindow(QWidget):
         tray.setToolTip(NAME)
         menu = QMenu()
         menu.addAction("Show / hide", self.toggle_visible)
+        menu.addAction("Settings…", self.open_settings)
         menu.addAction("New conversation", self.new_conversation)
         menu.addSeparator()
         menu.addAction("Quit", self.quit)
@@ -590,11 +619,12 @@ class CompanionWindow(QWidget):
     def start_engine(self) -> None:
         warmup = self.conversation.prompt(self.personality, self.settings.history_tokens)
         warmup.append({"role": "user", "content": "Hi"})
-        self.starter = EngineStarter(self.engine, warmup, self.settings)
-        self.starter.status.connect(lambda text: self.say(text))
-        self.starter.ready.connect(self.on_ready)
-        self.starter.failed.connect(self.on_engine_failed)
-        self.starter.start()
+        starter = self.starter = EngineStarter(self.engine, warmup, self.settings)
+        # Only the current starter may report: one cancelled for new settings stays quiet.
+        starter.status.connect(lambda text: starter is self.starter and self.say(text))
+        starter.ready.connect(lambda *args: starter is self.starter and self.on_ready(*args))
+        starter.failed.connect(lambda message: starter is self.starter and self.on_engine_failed(message))
+        starter.start()
 
     def _release_starter(self) -> None:
         # Wait for the thread to fully end before dropping it; Qt crashes otherwise.
@@ -622,7 +652,7 @@ class CompanionWindow(QWidget):
         where = "graphics chip" if device == "gpu" else "CPU"
         self._awake(
             f"ready in {seconds:.0f} s · running on the {where}",
-            "Okay, I'm using my local brain now. Nothing leaves this PC unless you use 🌐.",
+            LOCAL_ON,
         )
 
     def _awake(self, stats: str, switched: str) -> None:
@@ -632,7 +662,7 @@ class CompanionWindow(QWidget):
         self.input.setPlaceholderText(self._idle_placeholder())
         self._update_web_tooltip()
         if self.greeted:
-            text = switched
+            text = self.wake_note or switched
         elif self.conversation.messages:
             text = "Welcome back! I'm awake."
         else:
@@ -641,6 +671,7 @@ class CompanionWindow(QWidget):
                 "Drag me to move me around, and right-click me for options."
             )
         self.greeted = True
+        self.wake_note = ""
         self.say(text, stats)
         self.character.react("happy", seconds=4)
         self.hide_bubble.start(self.settings.bubble_seconds * 1000)
@@ -651,6 +682,7 @@ class CompanionWindow(QWidget):
     def on_engine_failed(self, message: str) -> None:
         self._release_starter()
         self.local_ready = False
+        self.wake_note = ""
         if self.waiting_for_local:
             self.waiting_for_local = False
             self._undo_last_message()
@@ -681,10 +713,10 @@ class CompanionWindow(QWidget):
     def start_cloud(self, key: str) -> None:
         if self.cloud_starter is not None:
             return
-        self.cloud_starter = CloudStarter(key, self.settings.claude_model)
-        self.cloud_starter.ready.connect(self.on_cloud_ready)
-        self.cloud_starter.failed.connect(self.on_cloud_failed)
-        self.cloud_starter.start()
+        starter = self.cloud_starter = CloudStarter(key, self.settings.claude_model)
+        starter.ready.connect(lambda *args: self.on_cloud_ready(*args) if starter is self.cloud_starter else args[0].close())
+        starter.failed.connect(lambda message: starter is self.cloud_starter and self.on_cloud_failed(message))
+        starter.start()
 
     def _release_cloud_starter(self) -> None:
         starter, self.cloud_starter = self.cloud_starter, None
@@ -708,6 +740,7 @@ class CompanionWindow(QWidget):
 
     def on_cloud_failed(self, message: str) -> None:
         self._release_cloud_starter()
+        self.wake_note = ""
         self.character.react("concerned", seconds=6)
         if self.local_ready:
             self.say(f"I couldn't connect to Claude.\n{message}\nI'll keep using my local brain for now.")
@@ -1122,10 +1155,7 @@ class CompanionWindow(QWidget):
     def new_conversation(self) -> None:
         if self.worker is not None:
             return
-        answer = QMessageBox.question(
-            self, NAME, f"Start a new conversation? {NAME} will forget this one."
-        )
-        if answer != QMessageBox.StandardButton.Yes:
+        if not theme.confirm(self, "New conversation", f"Start a new conversation? {NAME} will forget this one."):
             return
         self._silence()
         self.conversation.clear()
@@ -1209,8 +1239,7 @@ class CompanionWindow(QWidget):
 
     def _switch_to_claude(self) -> None:
         if self.settings.brain != "claude":
-            answer = QMessageBox.question(self, NAME, self.CONSENT)
-            if answer != QMessageBox.StandardButton.Yes:
+            if not theme.confirm(self, "Use Claude", self.CONSENT):
                 return
         key = storage.load_claude_key() or self._ask_claude_key()
         if not key:
@@ -1227,11 +1256,11 @@ class CompanionWindow(QWidget):
         self._update_web_tooltip()
         if self.local_ready:
             self.character.react("happy", seconds=3)
-            self.say(intro + "Okay, I'm using my local brain now. Nothing leaves this PC unless you use 🌐.")
+            self.say(intro + LOCAL_ON)
             return
         self.ready = False
         self.input.setEnabled(False)
-        self.input.setPlaceholderText("Waking up…")
+        self.input.setPlaceholderText(WAKING)
         self.character.sleeping()
         self.say(intro + "Okay, switching to my local brain. It needs about half a minute to wake up…")
         if self.starter is None:
@@ -1256,17 +1285,17 @@ class CompanionWindow(QWidget):
         )
 
     def _ask_claude_key(self) -> str | None:
-        key, accepted = QInputDialog.getText(
+        key = theme.ask_text(
             self,
             "Claude API key",
             "Paste your Claude API key (from the Claude Console; it starts with sk-ant-).\n"
             "It's stored encrypted for your Windows account and only ever sent to Anthropic.",
-            QLineEdit.EchoMode.Password,
+            password=True,
         )
-        key = key.strip()
-        if not accepted or not key:
+        key = (key or "").strip()
+        if not key:
             return None
-        if not re.fullmatch(r"sk-ant-[A-Za-z0-9_-]{20,400}", key):
+        if not CLAUDE_KEY.fullmatch(key):
             self.say("That doesn't look like a Claude API key (they start with sk-ant-), so I didn't save it.")
             return None
         storage.save_claude_key(key)
@@ -1297,8 +1326,7 @@ class CompanionWindow(QWidget):
             return
         if self._busy():
             return
-        answer = QMessageBox.question(self, NAME, "Remove the saved Claude API key?")
-        if answer != QMessageBox.StandardButton.Yes:
+        if not theme.confirm(self, "Claude API key", "Remove the saved Claude API key?"):
             return
         storage.clear_claude_key()
         if self.cloud is not None:
@@ -1312,17 +1340,17 @@ class CompanionWindow(QWidget):
     # Internet settings -------------------------------------------------------
 
     def set_brave_key(self) -> None:
-        key, accepted = QInputDialog.getText(
+        key = theme.ask_text(
             self,
             "Web search key",
             "Paste your Brave Search API key.\n"
             "It's stored encrypted for your Windows account and only ever sent to Brave.",
-            QLineEdit.EchoMode.Password,
+            password=True,
         )
-        key = key.strip()
-        if not accepted or not key:
+        key = (key or "").strip()
+        if not key:
             return
-        if not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", key):
+        if not BRAVE_KEY.fullmatch(key):
             self.say("That doesn't look like a Brave Search API key, so I didn't save it.")
             return
         storage.save_brave_key(key)
@@ -1333,20 +1361,19 @@ class CompanionWindow(QWidget):
         if not storage.BRAVE_KEY_FILE.is_file():
             self.say("There's no web search key saved.")
             return
-        answer = QMessageBox.question(self, NAME, "Remove the saved Brave Search key?")
-        if answer == QMessageBox.StandardButton.Yes:
+        if theme.confirm(self, "Web search key", "Remove the saved Brave Search key?"):
             storage.clear_brave_key()
             self.say("Removed. For lookups I'll use Wikipedia now.")
 
     def set_weather_location(self) -> None:
-        place, accepted = QInputDialog.getText(
+        place = theme.ask_text(
             self,
             "Weather location",
-            "Your city, for weather questions that don't name a place\n(leave empty to clear):",
-            QLineEdit.EchoMode.Normal,
+            "Your city, for weather questions that don't name a place (leave empty to clear):",
             self.settings.web_location,
+            max_length=80,
         )
-        if not accepted:
+        if place is None:
             return
         self.settings.web_location = " ".join(place.split())[:80]
         save_settings(self.settings)
@@ -1412,9 +1439,173 @@ class CompanionWindow(QWidget):
         except OSError as error:
             self.say(f"I couldn't open {path.name}: {error}")
 
-    def _open_settings(self) -> None:
-        self._open_file(SETTINGS_FILE)
-        self.say("After changing settings, right-click me and choose Restart.")
+    # Settings window -----------------------------------------------------------
+
+    def open_settings(self) -> None:
+        if self.settings_window is None:
+            self.settings_window = SettingsWindow(
+                self.settings,
+                storage.CLAUDE_KEY_FILE.is_file(),
+                storage.BRAVE_KEY_FILE.is_file(),
+                on_top=self.settings.always_on_top,
+            )
+            self.settings_window.saved.connect(self.apply_settings)
+            self.settings_window.finished.connect(self._settings_closed)
+        theme.present(self.settings_window, self)
+
+    def _settings_closed(self) -> None:
+        window, self.settings_window = self.settings_window, None
+        if window is not None:
+            window.deleteLater()
+
+    def apply_settings(self, change: SettingsChange) -> None:
+        """Applies what was saved in the settings window, reloading what needs it."""
+        if self.quitting:
+            return
+        old = replace(self.settings)
+        for name in change.changed:
+            setattr(self.settings, name, getattr(change.settings, name))
+        fit_history(self.settings)
+        problems = []
+        try:
+            save_settings(self.settings)
+        except OSError as error:
+            problems.append(f"I couldn't write settings.json ({error}), so they only last until I restart.")
+        try:
+            self._save_keys(change)
+        except OSError as error:
+            problems.append(f"I couldn't save the API key: {error}")
+        self._apply_now(old)
+        if change.changed & VOICE_RELOAD:
+            self.speaker.reload()
+            self._silence()
+            if self.settings.voice_enabled:
+                self.speaker.preload()
+        # Reload only the brain that's in use (or loaded); the other picks the settings up when it starts.
+        on_claude = self.settings.brain == "claude"
+        local_loaded = self.local_ready or self.starter is not None
+        local = bool(change.changed & LOCAL_RELOAD) and (not on_claude or local_loaded)
+        claude = "brain" in change.changed or (
+            on_claude and (bool(change.changed & CLAUDE_RELOAD) or change.claude_key is not None)
+        )
+        if self.starter is None:
+            self.engine.device = self.settings.device  # it may have fallen back to the CPU before
+        if not local and not claude:
+            if self.worker is None:  # otherwise her reply stays in the bubble
+                self.character.react("happy", seconds=3)
+                self.say("\n".join(["Saved! Your new settings are on.", *problems]))
+                self.hide_bubble.start(self.settings.bubble_seconds * 1000)
+            return
+        if problems:
+            self.bubble.set_note(" ".join(problems))
+        if self.worker is not None:
+            self.stop_reply()  # she reloads once this reply has wrapped up
+        self._reload_when_idle(local, claude, "brain" in change.changed)
+
+    @staticmethod
+    def _save_keys(change: SettingsChange) -> None:
+        if change.claude_key is not None:
+            if change.claude_key:
+                storage.save_claude_key(change.claude_key)
+            else:
+                storage.clear_claude_key()
+        if change.brave_key is not None:
+            if change.brave_key:
+                storage.save_brave_key(change.brave_key)
+            else:
+                storage.clear_brave_key()
+
+    def _apply_now(self, old: Settings) -> None:
+        """Settings that take effect without loading anything again."""
+        new = self.settings
+        self.speaker.voice = new.voice
+        if new.voice_enabled != old.voice_enabled:
+            self.set_voice_enabled(new.voice_enabled)
+        if new.text_with_voice != old.text_with_voice:
+            self.set_text_with_voice(new.text_with_voice)
+        if new.always_on_top != old.always_on_top:
+            self.on_top_action.setChecked(new.always_on_top)  # also moves the window to or from the top
+        if new.character_height != old.character_height:
+            self._resize_character(new.character_height)
+        self._update_web_tooltip()
+
+    def _reload_when_idle(self, local: bool, claude: bool, switched: bool) -> None:
+        if self.quitting:
+            return
+        if self.worker is not None:  # a stopped reply is still wrapping up
+            QTimer.singleShot(100, lambda: self._reload_when_idle(local, claude, switched))
+            return
+        if local:
+            self._stop_local()
+        if claude:
+            self._stop_cloud()
+        if self.settings.brain == "claude":
+            self._reload_claude(switched)
+        else:
+            self._reload_local(switched)
+
+    def _reload_local(self, switched: bool) -> None:
+        if self.local_ready:
+            self.character.react("happy", seconds=3)
+            self.say(LOCAL_ON if switched else "Saved! Your new settings are on.")
+            self.hide_bubble.start(self.settings.bubble_seconds * 1000)
+            return
+        self._sleep(WAKING)
+        if switched:
+            self.say("Okay, switching to my local brain. It needs about half a minute to wake up…")
+        else:
+            self.wake_note = "New settings loaded. I'm awake again!"
+            self.say("Reloading my brain with the new settings. It needs about half a minute…")
+        if self.starter is None:
+            self.start_engine()
+
+    def _reload_claude(self, switched: bool) -> None:
+        if self.waiting_for_local and self.starter is None:
+            self.start_engine()  # a message is still waiting for the local brain
+        if self._online() or self.cloud_starter is not None:
+            self.say("Saved! My local brain uses the new settings next time it starts.")
+            self.hide_bubble.start(self.settings.bubble_seconds * 1000)
+            return
+        key = storage.load_claude_key()
+        if not key:
+            self._switch_to_local("There's no Claude API key saved. ")
+            return
+        if not self.local_ready:
+            self._sleep(CONNECTING)
+        if not switched:
+            label = cloud.MODELS[self.settings.claude_model].label
+            self.wake_note = f"New settings loaded. I'm thinking with {label} now."
+        self.say(CONNECTING)
+        self.start_cloud(key)  # on_cloud_ready takes it from there
+
+    def _sleep(self, placeholder: str) -> None:
+        """She can't take messages until her brain is ready again."""
+        self.ready = False
+        self.input.setEnabled(False)
+        self.input.setPlaceholderText(placeholder)
+        self.character.sleeping()
+
+    def _stop_local(self) -> None:
+        """Stops the local brain, or its loading, so it starts again with the new settings."""
+        starter, self.starter = self.starter, None
+        if starter is not None:
+            starter.stop()
+        self.engine.stop()  # also ends the loading it may be waiting on
+        if starter is not None:
+            starter.wait(5000)
+            self.engine.stop()  # in case it had just started the engine
+        self.local_ready = False
+        self.engine.device = self.settings.device
+
+    def _stop_cloud(self) -> None:
+        """Drops the Claude connection (and any connecting), so it reconnects with the new settings."""
+        starter, self.cloud_starter = self.cloud_starter, None
+        if starter is not None:
+            starter.stop()
+            starter.wait(5000)
+        if self.cloud is not None:
+            self.cloud.close()
+            self.cloud = None
 
     def restart(self) -> None:
         self.shutdown()
@@ -1429,6 +1620,8 @@ class CompanionWindow(QWidget):
         if self.quitting:
             return
         self.quitting = True
+        if self.settings_window is not None:
+            self.settings_window.done(0)  # closes it without asking about unsaved changes
         self.speaker.close()
         threads = (self.worker, self.starter, self.cloud_starter)
         for thread in threads:
@@ -1469,9 +1662,7 @@ def main() -> int:
     lock = QLockFile(str(DATA / "companion.lock"))
     lock.setStaleLockTime(0)
     if not lock.tryLock(10000):
-        QMessageBox.information(
-            None, NAME, f"{NAME} is already running. Look on your desktop or in the system tray."
-        )
+        theme.inform(None, NAME, f"{NAME} is already running. Look on your desktop or in the system tray.")
         return 0
     settings, notes = load_settings()
     window = CompanionWindow(settings, notes)

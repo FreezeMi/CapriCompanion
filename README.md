@@ -47,8 +47,8 @@ model and warms up the graphics chip. Her voice loads a few seconds after that.
 | Press **Esc** | Stop her reply and her voice, and show the whole reply |
 | Drag her | Move her (she remembers where) |
 | Click her | Get her attention |
-| Right-click her | New conversation, personality, settings, **Brain**, **Voice**, **Internet**, always on top, hide, restart, quit |
-| Use the tray icon | Show or hide her, or quit |
+| Right-click her | New conversation, **Settings…**, personality, **Brain**, **Voice**, **Internet**, always on top, hide, restart, quit |
+| Use the tray icon | Show or hide her, open the settings, or quit |
 
 Quitting stops the AI engine and frees its memory. She doesn't start with Windows.
 
@@ -205,7 +205,26 @@ Like settings.json, it's your own file, so Git ignores it.
 
 ## Settings
 
-Right-click her, choose **Open settings…**, edit, save, then choose **Restart**.
+Right-click her (or the tray icon) and choose **Settings…**. The settings window opens
+in the middle of the screen, in front of her. Change as many settings as you like across
+its pages (Brain, Local brain, Voice, Internet, Display), then press **Save**. The bottom
+line counts your unsaved changes and says what saving will reload.
+
+Saving applies everything right away, and reloads only what has to load again:
+
+- **Local brain** settings (graphics chip or CPU, threads, working memory) reload the
+  local model, which takes about half a minute. If Claude is her brain, they apply the
+  next time the local model starts.
+- Changing the **brain**, the **Claude model** or the **Claude API key** reconnects her.
+- **Voice threads** reload her voice.
+- Everything else (voice, pitch, size, bubble time, lookups…) applies without reloading.
+
+If she's in the middle of a reply, saving stops it first. **Cancel** or **Esc** closes
+the window without changes; **Defaults** puts every setting back (your keys stay).
+
+The window saves to `settings.json`, which you can also edit by hand (**Display** →
+**Open file**, or the file itself). It also holds the model and engine paths, which the
+window doesn't show. Restart her after editing the file.
 
 | Setting | Meaning |
 |---|---|
@@ -285,6 +304,7 @@ Right-click her, choose **Open settings…**, edit, save, then choose **Restart*
 | `engine/`, `models/`, `.venv/` | Downloaded by Install.cmd (`models/voice/` is the voice) |
 | `assets/character/`, `assets/icon/` | Character images and icon: not in the repository, see below |
 | `assets/fonts/exo2/` | Exo 2 font (SIL Open Font License) |
+| `assets/ui/` | Small arrow images for the settings window |
 
 To uninstall, quit Capri and delete this folder. Nothing is installed anywhere else.
 

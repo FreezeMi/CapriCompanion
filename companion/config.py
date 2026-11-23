@@ -78,6 +78,11 @@ CHOICES = {
 # Room kept free in the context for the personality, the rules and the reply.
 PROMPT_RESERVE_TOKENS = 1024
 
+# Settings that only take effect when that part is loaded again.
+LOCAL_RELOAD = frozenset({"model", "engine", "device", "threads", "threads_batch", "context_tokens"})
+CLAUDE_RELOAD = frozenset({"brain", "claude_model"})
+VOICE_RELOAD = frozenset({"voice_model", "voice_styles", "voice_threads"})
+
 
 def _valid(name: str, default: object, value: object) -> bool:
     if isinstance(default, bool):
@@ -119,15 +124,29 @@ def load_settings() -> tuple[Settings, list[str]]:
             value = default
         values[field.name] = float(value) if isinstance(default, float) else value
     settings = Settings(**values)
-    room = settings.context_tokens - settings.max_reply_tokens - PROMPT_RESERVE_TOKENS
-    if settings.history_tokens > room:
-        settings.history_tokens = max(256, room)
+    fit_history(settings)
     unknown = sorted(set(raw) - {field.name for field in fields(Settings)})
     if unknown:
         problems.append("Unknown settings ignored: " + ", ".join(unknown))
     if not SETTINGS_FILE.is_file() or set(raw) != {field.name for field in fields(Settings)}:
         save_settings(settings)
     return settings, problems
+
+
+def history_limit(context_tokens: int, max_reply_tokens: int) -> int:
+    """The most past conversation that fits next to the personality, rules and reply."""
+    low, high = LIMITS["history_tokens"]
+    return max(low, min(high, context_tokens - max_reply_tokens - PROMPT_RESERVE_TOKENS))
+
+
+def fit_history(settings: Settings) -> None:
+    settings.history_tokens = min(
+        settings.history_tokens, history_limit(settings.context_tokens, settings.max_reply_tokens)
+    )
+
+
+def changed_settings(old: Settings, new: Settings) -> set[str]:
+    return {field.name for field in fields(Settings) if getattr(old, field.name) != getattr(new, field.name)}
 
 
 def save_settings(settings: Settings) -> None:

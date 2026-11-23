@@ -134,6 +134,18 @@ class CharacterView(QLabel):
         """Prepares the other frames in small steps after the window is visible."""
         self._preloader.start()
 
+    def set_height(self, height: int) -> None:
+        """Shows her at a new size, keeping the current frame."""
+        if height == self._height:
+            return
+        self._height = height
+        self._pixmaps.clear()
+        self._to_preload = [name for name in FILES if name != "neutral"]
+        shown, self.current = self.current or "neutral", ""
+        self._show(shown)
+        self.setFixedSize(self.frame("neutral").deviceIndependentSize().toSize())
+        self.preload()
+
     def _preload_next(self) -> None:
         if not self._to_preload:
             self._preloader.stop()

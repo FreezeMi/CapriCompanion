@@ -231,6 +231,11 @@ class Speaker(QObject):
     def preload(self) -> None:
         self._texts.put(("load", 0, "", None))
 
+    def reload(self) -> None:
+        """Goes quiet and loads the voice model again (new files or threads) when next needed."""
+        self.stop()
+        self._texts.put(("reload", 0, "", None))
+
     def say(self, text: str, tag: object = None) -> None:
         """Queues text to speak; `tag` comes back in `progress` while it plays."""
         if not text.strip():
@@ -320,6 +325,9 @@ class Speaker(QObject):
         kokoro = None
         while (item := self._texts.get()) is not None:
             kind, generation, text, tag = item
+            if kind == "reload":
+                kokoro = None
+                continue
             if kind == "say" and generation != self.generation:
                 continue  # stopped before it was spoken
             try:
