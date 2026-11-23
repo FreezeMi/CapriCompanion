@@ -1,0 +1,15 @@
+# Downloaded and generated files
+.venv/
+engine/
+models/
+__pycache__/
+*.pyc
+
+# Personal files: your conversation, keys, logs, settings and your own personality
+data/
+settings.json
+personality.txt
+
+# Character art: personal use only, never publish it (see the README)
+assets/character/
+assets/icon/
