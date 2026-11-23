@@ -45,9 +45,9 @@ model and warms up the graphics chip. Her voice loads a few seconds after that.
 | Type and press **Enter** | Talk to her |
 | Click 🌐, or press **Ctrl+Enter** | Let her look your message up online (that message only) |
 | Press **Esc** | Stop her reply and her voice, and show the whole reply |
-| Drag her | Move her (she remembers where) |
+| Drag her (or her window's title bar) | Move her (she remembers where) |
 | Click her | Get her attention |
-| Right-click her | New conversation, **Settings…**, personality, **Brain**, **Voice**, **Internet**, always on top, hide, restart, quit |
+| Right-click her | New conversation, **Settings…**, personality, **Brain**, **Voice**, **Internet**, always on top, show in a window, hide, restart, quit |
 | Use the tray icon | Show or hide her, open the settings, or quit |
 
 Quitting stops the AI engine and frees its memory. She doesn't start with Windows.
@@ -206,7 +206,8 @@ Like settings.json, it's your own file, so Git ignores it.
 ## Settings
 
 Right-click her (or the tray icon) and choose **Settings…**. The settings window opens
-in the middle of the screen, in front of her. Change as many settings as you like across
+in the middle of the screen. It's an ordinary window: it doesn't stay on top, and you
+can minimize it. Change as many settings as you like across
 its pages (Brain, Local brain, Voice, Internet, Display), then press **Save**. The bottom
 line counts your unsaved changes and says what saving will reload.
 
@@ -219,8 +220,8 @@ Saving applies everything right away, and reloads only what has to load again:
 - **Voice threads** reload her voice.
 - Everything else (voice, pitch, size, bubble time, lookups…) applies without reloading.
 
-If she's in the middle of a reply, saving stops it first. **Cancel** or **Esc** closes
-the window without changes; **Defaults** puts every setting back (your keys stay).
+If she's in the middle of a reply, saving stops it first. The window stays open after
+saving; **Close**, **✕** or **Esc** closes it (asking first if something is unsaved); **Defaults** puts every setting back (your keys stay).
 
 The window saves to `settings.json`, which you can also edit by hand (**Display** →
 **Open file**, or the file itself). It also holds the model and engine paths, which the
@@ -240,7 +241,8 @@ window doesn't show. Restart her after editing the file.
 | `voice_effect`, `voice_pitch` | Robot effect (`off`, `light`, `robotic`, `full`) and pitch (0.8–1.25); the Voice menu changes both |
 | `voice_threads` | CPU threads for the voice. 4 worked best on the laptop above; more competes with the chat model. |
 | `character_height` | Her size on screen, in pixels |
-| `always_on_top`, `show_stats`, `bubble_seconds` | Window behavior, the speed line under replies, and how long the bubble stays |
+| `window_mode` | `"overlay"`: she stands right on your desktop; `"window"`: she's in a small framed window you can minimize (its ✕ hides her in the tray) |
+| `always_on_top`, `show_stats`, `bubble_seconds` | Whether she stays above other windows, the speed line under replies, and how long the bubble stays |
 | `web_location` | Your city, for weather questions that don't name a place (the Internet menu sets it) |
 | `web_results`, `web_safesearch` | How many search results she reads (1–10), and Brave's safe search (`off`, `moderate`, `strict`) |
 | `brain` | `"local"` or `"claude"` (the Brain menu changes it) |

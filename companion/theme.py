@@ -1,12 +1,12 @@
 """Capri's neon look for her windows: colors, the font, framed dialogs and their controls.
 
 Every window opened from Capri goes through `place()`, so it appears in the middle of
-the screen she's on, and stays above her when she's always on top.
+the screen she's on. Her small dialogs stay on top; the settings window doesn't.
 """
 
 from __future__ import annotations
 
-from PySide6.QtCore import QPoint, QPointF, QRectF, QSize, Qt
+from PySide6.QtCore import QPoint, QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -166,8 +166,12 @@ def place(window: QWidget, near: QWidget | None = None) -> None:
 
 
 def present(window: QWidget, near: QWidget | None = None) -> None:
-    """Shows a window in the middle of the screen, in front of everything else."""
-    place(window, near)
+    """Shows a window in front of everything else: in the middle of the screen when it
+    opens, or where it was (restored if minimized) when it's already open."""
+    if not window.isVisible():
+        place(window, near)
+    if window.isMinimized():
+        window.showNormal()
     window.show()
     window.raise_()
     window.activateWindow()
@@ -256,6 +260,120 @@ class CloseButton(QAbstractButton):
             painter.drawLine(QPointF(middle.x() - dx, middle.y() - dy), QPointF(middle.x() + dx, middle.y() + dy))
 
 
+class MinimizeButton(QAbstractButton):
+    """The – in a window's title bar."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setFixedSize(30, 26)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("Minimize")
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        hover = self.underMouse()
+        if hover:
+            painter.fillRect(self.rect(), QColor(255, 255, 255, 24))
+        painter.setPen(QPen(QColor(TEXT if hover else MUTED), 1.6))
+        middle = QRectF(self.rect()).center()
+        painter.drawLine(QPointF(middle.x() - 5, middle.y()), QPointF(middle.x() + 5, middle.y()))
+
+
+class TitleBar(QWidget):
+    """A window's title, its buttons, and dragging the window around by it."""
+
+    HEIGHT = 44
+    minimize_clicked = Signal()
+    close_clicked = Signal()
+    moved = Signal()  # after the window was dragged somewhere else
+
+    def __init__(self, title: str, minimizable: bool = False, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setFixedHeight(self.HEIGHT)
+        self._drag: QPoint | None = None
+        heading = QLabel(f"// {title.upper()}")
+        heading.setFont(font(10.5, bold=True, spacing=2.5))
+        heading.setStyleSheet(f"color: {TEXT};")
+        row = QHBoxLayout(self)
+        row.setContentsMargins(CUT + 10, 0, 10, 0)
+        row.setSpacing(2)
+        row.addWidget(heading)
+        row.addStretch(1)
+        if minimizable:
+            self.minimize_button = MinimizeButton()
+            self.minimize_button.clicked.connect(self.minimize_clicked)
+            row.addWidget(self.minimize_button)
+        self.close_button = CloseButton()
+        self.close_button.clicked.connect(self.close_clicked)
+        row.addWidget(self.close_button)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag = event.globalPosition().toPoint() - self.window().frameGeometry().topLeft()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._drag is not None:
+            self.window().move(event.globalPosition().toPoint() - self._drag)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if self._drag is not None:
+            self._drag = None
+            self.moved.emit()
+        super().mouseReleaseEvent(event)
+
+
+def paint_frame(window: QWidget, title_height: int) -> None:
+    """Paints the neon frame of a window: cut corners, scanlines, a glowing title strip."""
+    painter = QPainter(window)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    rect = QRectF(window.rect()).adjusted(1, 1, -1, -1)
+    frame = QPainterPath()
+    frame.addPolygon(cut_corners(rect, CUT))
+    frame.closeSubpath()
+
+    shade = QLinearGradient(rect.topLeft(), rect.bottomRight())
+    shade.setColorAt(0, QColor(24, 14, 26, 250))
+    shade.setColorAt(0.45, QColor(BACKGROUND))
+    shade.setColorAt(1, QColor(8, 16, 22, 250))
+    painter.fillPath(frame, shade)
+
+    painter.save()
+    painter.setClipPath(frame)
+    painter.setPen(QPen(QColor(255, 255, 255, 7), 1))
+    for y in range(int(rect.top()), int(rect.bottom()), 3):  # scanlines
+        painter.drawLine(QPointF(rect.left(), y), QPointF(rect.right(), y))
+    glow = QLinearGradient(rect.topLeft(), QPointF(rect.left(), rect.top() + title_height))
+    glow.setColorAt(0, QColor(255, 45, 85, 40))
+    glow.setColorAt(1, QColor(255, 45, 85, 0))
+    painter.fillRect(QRectF(rect.left(), rect.top(), rect.width(), title_height), glow)
+    painter.setPen(QPen(QColor(LINE), 1))
+    painter.drawLine(
+        QPointF(rect.left() + CUT + 10, rect.top() + title_height),
+        QPointF(rect.right() - 10, rect.top() + title_height),
+    )
+    painter.restore()
+
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.setPen(QPen(QColor(ACCENT), 1.4))
+    painter.drawPath(frame)
+    # Accents: a cyan cut corner, a yellow bar along the bottom and small ticks.
+    painter.setPen(QPen(QColor(CYAN), 3))
+    painter.drawLine(QPointF(rect.left() + 1, rect.top() + CUT), QPointF(rect.left() + CUT, rect.top() + 1))
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QColor(YELLOW))
+    painter.drawRect(QRectF(rect.left() + 24, rect.bottom() - 3, 56, 3))
+    painter.setBrush(QColor(ACCENT))
+    for index in range(3):
+        painter.drawRect(QRectF(rect.right() - 60 + index * 8, rect.top() + 4, 4, 4))
+
+
 class Segmented(QWidget):
     """A row of buttons where exactly one is chosen."""
 
@@ -289,11 +407,19 @@ class Segmented(QWidget):
 class NeonDialog(QDialog):
     """A frameless window with a neon outline, scanlines and its own title bar."""
 
-    TITLE_HEIGHT = 44
+    TITLE_HEIGHT = TitleBar.HEIGHT
 
-    def __init__(self, title: str, parent: QWidget | None = None, on_top: bool = True) -> None:
+    def __init__(
+        self,
+        title: str,
+        parent: QWidget | None = None,
+        on_top: bool = True,
+        minimizable: bool = False,
+    ) -> None:
         flags = Qt.WindowType.Dialog if parent is not None else Qt.WindowType.Window
         flags |= Qt.WindowType.FramelessWindowHint
+        if minimizable:  # lets the taskbar button minimize and restore it too
+            flags |= Qt.WindowType.WindowMinimizeButtonHint
         if on_top:
             flags |= Qt.WindowType.WindowStaysOnTopHint
         super().__init__(parent, flags)
@@ -301,21 +427,10 @@ class NeonDialog(QDialog):
         self.setWindowTitle(title)
         self.setStyleSheet(STYLE)
         self.setFont(font(10))
-        self._drag: QPoint | None = None
 
-        heading = QLabel(f"// {title.upper()}")
-        heading.setFont(font(10.5, bold=True, spacing=2.5))
-        heading.setStyleSheet(f"color: {TEXT};")
-        close = CloseButton()
-        close.clicked.connect(self.reject)
-        title_row = QHBoxLayout()
-        title_row.setContentsMargins(CUT + 10, 0, 10, 0)
-        title_row.addWidget(heading)
-        title_row.addStretch(1)
-        title_row.addWidget(close)
-        title_bar = QWidget()
-        title_bar.setFixedHeight(self.TITLE_HEIGHT)
-        title_bar.setLayout(title_row)
+        self.title_bar = TitleBar(title, minimizable)
+        self.title_bar.close_clicked.connect(self.reject)
+        self.title_bar.minimize_clicked.connect(self.showMinimized)
 
         self.body = QVBoxLayout()
         self.body.setContentsMargins(22, 14, 22, 20)
@@ -323,73 +438,11 @@ class NeonDialog(QDialog):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(2, 2, 2, 2)
         outer.setSpacing(0)
-        outer.addWidget(title_bar)
+        outer.addWidget(self.title_bar)
         outer.addLayout(self.body, 1)
 
-    # Dragging by the title bar -------------------------------------------------
-
-    def mousePressEvent(self, event) -> None:  # noqa: N802
-        if event.button() == Qt.MouseButton.LeftButton and event.position().y() < self.TITLE_HEIGHT:
-            self._drag = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
-            event.accept()
-            return
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event) -> None:  # noqa: N802
-        if self._drag is not None:
-            self.move(event.globalPosition().toPoint() - self._drag)
-            event.accept()
-            return
-        super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
-        self._drag = None
-        super().mouseReleaseEvent(event)
-
-    # Frame ---------------------------------------------------------------------
-
     def paintEvent(self, event) -> None:  # noqa: N802
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rect = QRectF(self.rect()).adjusted(1, 1, -1, -1)
-        frame = QPainterPath()
-        frame.addPolygon(cut_corners(rect, CUT))
-        frame.closeSubpath()
-
-        shade = QLinearGradient(rect.topLeft(), rect.bottomRight())
-        shade.setColorAt(0, QColor(24, 14, 26, 250))
-        shade.setColorAt(0.45, QColor(BACKGROUND))
-        shade.setColorAt(1, QColor(8, 16, 22, 250))
-        painter.fillPath(frame, shade)
-
-        painter.save()
-        painter.setClipPath(frame)
-        painter.setPen(QPen(QColor(255, 255, 255, 7), 1))
-        for y in range(int(rect.top()), int(rect.bottom()), 3):  # scanlines
-            painter.drawLine(QPointF(rect.left(), y), QPointF(rect.right(), y))
-        glow = QLinearGradient(rect.topLeft(), QPointF(rect.left(), rect.top() + self.TITLE_HEIGHT))
-        glow.setColorAt(0, QColor(255, 45, 85, 40))
-        glow.setColorAt(1, QColor(255, 45, 85, 0))
-        painter.fillRect(QRectF(rect.left(), rect.top(), rect.width(), self.TITLE_HEIGHT), glow)
-        painter.setPen(QPen(QColor(LINE), 1))
-        painter.drawLine(
-            QPointF(rect.left() + CUT + 10, rect.top() + self.TITLE_HEIGHT),
-            QPointF(rect.right() - 10, rect.top() + self.TITLE_HEIGHT),
-        )
-        painter.restore()
-
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(QPen(QColor(ACCENT), 1.4))
-        painter.drawPath(frame)
-        # Accents: a cyan cut corner, a yellow bar along the bottom and small ticks.
-        painter.setPen(QPen(QColor(CYAN), 3))
-        painter.drawLine(QPointF(rect.left() + 1, rect.top() + CUT), QPointF(rect.left() + CUT, rect.top() + 1))
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(YELLOW))
-        painter.drawRect(QRectF(rect.left() + 24, rect.bottom() - 3, 56, 3))
-        painter.setBrush(QColor(ACCENT))
-        for index in range(3):
-            painter.drawRect(QRectF(rect.right() - 60 + index * 8, rect.top() + 4, 4, 4))
+        paint_frame(self, self.TITLE_HEIGHT)
 
 
 class MessageDialog(NeonDialog):

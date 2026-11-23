@@ -286,14 +286,7 @@ class SpeechBubble(QWidget):
 
 class CompanionWindow(QWidget):
     def __init__(self, settings: Settings, notes: list[str]) -> None:
-        flags = (
-            Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.Tool
-            | Qt.WindowType.NoDropShadowWindowHint
-        )
-        if settings.always_on_top:
-            flags |= Qt.WindowType.WindowStaysOnTopHint
-        super().__init__(None, flags)
+        super().__init__(None, self._flags_for(settings))
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setWindowTitle(NAME)
         self.settings = settings
@@ -369,24 +362,36 @@ class CompanionWindow(QWidget):
         )
         self.input.returnPressed.connect(self.send)
 
+        # In window mode: a title bar to drag, minimize and close her window.
+        self.title_bar = theme.TitleBar(NAME, minimizable=True)
+        self.title_bar.minimize_clicked.connect(self.showMinimized)
+        self.title_bar.close_clicked.connect(self._close_window)
+        self.title_bar.close_button.setToolTip(
+            "Hide (find me in the system tray)" if QSystemTrayIcon.isSystemTrayAvailable() else "Quit"
+        )
+        self.title_bar.moved.connect(lambda: storage.save_window_position(self.x(), self.y()))
         bubble_area = QWidget()
         bubble_area.setFixedHeight(BUBBLE_AREA)
         bubble_layout = QVBoxLayout(bubble_area)
         bubble_layout.setContentsMargins(0, 0, 0, 0)
         bubble_layout.addStretch(1)
         bubble_layout.addWidget(self.bubble, 0, Qt.AlignmentFlag.AlignHCenter)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(2)
-        layout.addWidget(bubble_area)
-        layout.addWidget(self.character, 0, Qt.AlignmentFlag.AlignHCenter)
+        self.content = QVBoxLayout()
+        self.content.setSpacing(2)
+        self.content.addWidget(bubble_area)
+        self.content.addWidget(self.character, 0, Qt.AlignmentFlag.AlignHCenter)
         input_row = QWidget()
         row_layout = QHBoxLayout(input_row)
         row_layout.setContentsMargins(0, 0, 0, 0)
         row_layout.setSpacing(6)
         row_layout.addWidget(self.input)
         row_layout.addWidget(self.web_button)
-        layout.addWidget(input_row, 0, Qt.AlignmentFlag.AlignHCenter)
+        self.content.addWidget(input_row, 0, Qt.AlignmentFlag.AlignHCenter)
+        layout = QVBoxLayout(self)
+        layout.setSpacing(0)
+        layout.addWidget(self.title_bar)
+        layout.addLayout(self.content)
+        self._layout_for_mode()
         self._fit_size()
         self._place()
 
@@ -424,14 +429,48 @@ class CompanionWindow(QWidget):
     def _load_font() -> QFont:
         return theme.font(10.5)
 
+    @staticmethod
+    def _flags_for(settings: Settings) -> Qt.WindowType:
+        flags = Qt.WindowType.FramelessWindowHint | Qt.WindowType.NoDropShadowWindowHint
+        if settings.window_mode == "window":  # a taskbar button, so she can be minimized
+            flags |= Qt.WindowType.Window | Qt.WindowType.WindowMinimizeButtonHint
+        else:
+            flags |= Qt.WindowType.Tool
+        if settings.always_on_top:
+            flags |= Qt.WindowType.WindowStaysOnTopHint
+        return flags
+
+    def _windowed(self) -> bool:
+        return self.settings.window_mode == "window"
+
+    def _layout_for_mode(self) -> None:
+        windowed = self._windowed()
+        self.title_bar.setVisible(windowed)
+        self.layout().setContentsMargins(*((2, 2, 2, 2) if windowed else (4, 4, 4, 4)))
+        self.content.setContentsMargins(*((14, 4, 14, 16) if windowed else (0, 0, 0, 0)))
+
     def _fit_size(self) -> None:
-        width = max(self.character.width(), BUBBLE_WIDTH, INPUT_WIDTH) + 8
-        self.setFixedSize(width, BUBBLE_AREA + self.character.height() + INPUT_HEIGHT + 12)
+        outer, inner = self.layout().contentsMargins(), self.content.contentsMargins()
+        width = max(self.character.width(), BUBBLE_WIDTH, INPUT_WIDTH)
+        width += outer.left() + outer.right() + inner.left() + inner.right()
+        height = BUBBLE_AREA + self.character.height() + INPUT_HEIGHT + 2 * self.content.spacing()
+        height += outer.top() + outer.bottom() + inner.top() + inner.bottom()
+        if self._windowed():
+            height += theme.TitleBar.HEIGHT
+        self.setFixedSize(width, height)
+
+    def paintEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        if self._windowed():
+            theme.paint_frame(self, theme.TitleBar.HEIGHT)
 
     def _resize_character(self, height: int) -> None:
         """A new size for her, keeping her feet where they were."""
+        self._refit(lambda: self.character.set_height(height))
+
+    def _refit(self, change: Callable[[], None]) -> None:
+        """Changes her size or look, keeping her feet where they were."""
         bottom, middle = self.geometry().bottom(), self.geometry().center().x()
-        self.character.set_height(height)
+        change()
         self._fit_size()
         x, y = middle - self.width() // 2, bottom - self.height() + 1
         screen = QGuiApplication.screenAt(QPoint(middle, bottom)) or QGuiApplication.primaryScreen()
@@ -464,6 +503,10 @@ class CompanionWindow(QWidget):
         self.on_top_action.setChecked(self.settings.always_on_top)
         self.on_top_action.toggled.connect(self.set_always_on_top)
         menu.addAction(self.on_top_action)
+        self.window_action = QAction("Show in a window", menu, checkable=True)
+        self.window_action.setChecked(self._windowed())
+        self.window_action.toggled.connect(self.set_window_mode)
+        menu.addAction(self.window_action)
         if self.tray is not None:
             menu.addAction("Hide (find me in the system tray)", self.hide)
         menu.addAction("Restart", self.restart)
@@ -1421,16 +1464,37 @@ class CompanionWindow(QWidget):
         return True
 
     def set_always_on_top(self, enabled: bool) -> None:
-        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, enabled)
-        self.show()
         self.settings.always_on_top = enabled
         save_settings(self.settings)
+        self._apply_flags()
 
-    def toggle_visible(self) -> None:
-        if self.isVisible():
+    def set_window_mode(self, windowed: bool) -> None:
+        """Shows her in a framed window, or right on the desktop."""
+        self.settings.window_mode = "window" if windowed else "overlay"
+        save_settings(self.settings)
+        self._refit(self._layout_for_mode)
+        self._apply_flags()
+        self.update()
+
+    def _apply_flags(self) -> None:
+        visible = self.isVisible()
+        self.setWindowFlags(self._flags_for(self.settings))  # this hides the window
+        if visible:
+            self.show()
+
+    def _close_window(self) -> None:
+        """The close button of her window: off to the system tray, or quit without a tray."""
+        if self.tray is not None:
             self.hide()
         else:
-            self.show()
+            self.quit()
+
+    def toggle_visible(self) -> None:
+        if self.isVisible() and not self.isMinimized():
+            self.hide()
+        else:
+            self.showNormal()
+            self.raise_()
             self.activateWindow()
 
     def _open_file(self, path) -> None:
@@ -1447,7 +1511,6 @@ class CompanionWindow(QWidget):
                 self.settings,
                 storage.CLAUDE_KEY_FILE.is_file(),
                 storage.BRAVE_KEY_FILE.is_file(),
-                on_top=self.settings.always_on_top,
             )
             self.settings_window.saved.connect(self.apply_settings)
             self.settings_window.finished.connect(self._settings_closed)
@@ -1525,6 +1588,8 @@ class CompanionWindow(QWidget):
             self.set_text_with_voice(new.text_with_voice)
         if new.always_on_top != old.always_on_top:
             self.on_top_action.setChecked(new.always_on_top)  # also moves the window to or from the top
+        if new.window_mode != old.window_mode:
+            self.window_action.setChecked(new.window_mode == "window")  # also reframes her
         if new.character_height != old.character_height:
             self._resize_character(new.character_height)
         self._update_web_tooltip()

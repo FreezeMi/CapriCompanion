@@ -4,6 +4,8 @@ from dataclasses import replace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import QPoint, Qt  # noqa: E402
+from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from companion import config  # noqa: E402
@@ -13,7 +15,7 @@ app = QApplication.instance() or QApplication([])
 
 
 def window(settings=None, claude_key=False, brave_key=False):
-    return SettingsWindow(settings or config.Settings(), claude_key, brave_key, on_top=False)
+    return SettingsWindow(settings or config.Settings(), claude_key, brave_key)
 
 
 class SettingsWindowTest(unittest.TestCase):
@@ -81,6 +83,44 @@ class SettingsWindowTest(unittest.TestCase):
         shown._save()
         self.assertEqual(len(received), 1)
         self.assertEqual(received[0].changed, {"bubble_seconds"})
+
+    def test_saving_keeps_the_window_open(self):
+        shown = window(brave_key=True)
+        shown.show()
+        shown.fields["window_mode"].set("window")
+        shown.claude_key.edit.setText("sk-ant-" + "b" * 40)
+        shown.brave_key.forget.setChecked(True)
+        shown._save()
+        self.assertTrue(shown.isVisible())
+        # What was saved is the new starting point: nothing is left unsaved.
+        change = shown.change()
+        self.assertEqual(change.changed, set())
+        self.assertIsNone(change.claude_key)
+        self.assertIsNone(change.brave_key)
+        self.assertFalse(shown.save_button.isEnabled())
+        self.assertTrue(shown.claude_key.saved)
+        self.assertFalse(shown.brave_key.saved)
+        self.assertFalse(shown.brave_key.forget.isVisible())
+        shown.fields["window_mode"].set("overlay")
+        self.assertEqual(shown.change().changed, {"window_mode"})
+        shown.done(0)
+
+    def test_settings_window_is_not_always_on_top(self):
+        flags = window().windowFlags()
+        self.assertFalse(flags & Qt.WindowType.WindowStaysOnTopHint)
+        self.assertTrue(flags & Qt.WindowType.WindowMinimizeButtonHint)
+
+    def test_pointing_hand_only_over_pages(self):
+        shown = window()
+        shown.show()
+        nav = shown.nav
+        first = nav.visualItemRect(nav.item(0)).center()
+        empty = QPoint(10, nav.viewport().height() - 5)
+        self.assertIsNone(nav.itemAt(empty))
+        for point, cursor in ((first, Qt.CursorShape.PointingHandCursor), (empty, Qt.CursorShape.ArrowCursor)):
+            QTest.mouseMove(nav.viewport(), point)
+            self.assertEqual(nav.viewport().cursor().shape(), cursor)
+        shown.done(0)
 
     def test_defaults_button(self):
         shown = window(config.Settings(voice_volume=0.3, always_on_top=False))

@@ -118,7 +118,7 @@ class KeyField(QWidget):
 
     def __init__(self, saved: bool, empty_hint: str) -> None:
         super().__init__()
-        self.saved = saved
+        self.saved, self.empty_hint = saved, empty_hint
         self.edit = QLineEdit()
         self.edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.edit.setMaxLength(400)
@@ -136,6 +136,17 @@ class KeyField(QWidget):
         layout.setSpacing(4)
         layout.addWidget(self.edit, 1)
         layout.addWidget(self.forget)
+
+    def reset(self, saved: bool) -> None:
+        """After saving: empty again, showing whether a key is saved now."""
+        self.saved = saved
+        self.forget.blockSignals(True)
+        self.forget.setChecked(False)
+        self.forget.blockSignals(False)
+        self.forget.setVisible(saved)
+        self.edit.setEnabled(True)
+        self.edit.clear()
+        self.edit.setPlaceholderText("Saved · paste a new key to replace it" if saved else self.empty_hint)
 
     def _on_forget(self, forget: bool) -> None:
         self.edit.setEnabled(not forget)
@@ -162,23 +173,39 @@ class KeyField(QWidget):
         self.edit.style().polish(self.edit)
 
 
+class NavList(QListWidget):
+    """The list of pages, with a pointing hand only over the pages themselves."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.viewport().setMouseTracking(True)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        over_page = self.itemAt(event.position().toPoint()) is not None
+        if over_page:
+            self.viewport().setCursor(Qt.CursorShape.PointingHandCursor)
+        else:
+            self.viewport().unsetCursor()
+        super().mouseMoveEvent(event)
+
+
 class SettingsWindow(theme.NeonDialog):
     saved = Signal(object)  # a SettingsChange
 
     PAGES = ("Brain", "Local brain", "Voice", "Internet", "Display")
 
-    def __init__(self, settings: Settings, has_claude_key: bool, has_brave_key: bool, on_top: bool) -> None:
-        super().__init__("Settings", None, on_top)
+    def __init__(self, settings: Settings, has_claude_key: bool, has_brave_key: bool) -> None:
+        # Not always on top: that setting is for Capri herself.
+        super().__init__("Settings", None, on_top=False, minimizable=True)
         self.setModal(False)
         self.fields: dict[str, _Field] = {}
         self._loading = True
         self.has_claude_key, self.has_brave_key = has_claude_key, has_brave_key
 
-        self.nav = QListWidget()
+        self.nav = NavList()
         self.nav.setObjectName("nav")
         self.nav.setFixedWidth(NAV_WIDTH)
         self.nav.setFont(theme.font(9.5, bold=True, spacing=2))
-        self.nav.setCursor(Qt.CursorShape.PointingHandCursor)
         self.nav.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.stack = QStackedWidget()
         builders = (
@@ -216,15 +243,15 @@ class SettingsWindow(theme.NeonDialog):
         defaults = theme.NeonButton("Defaults")
         defaults.setToolTip("Put every setting back to how Capri came (keys stay as they are)")
         defaults.clicked.connect(self._restore_defaults)
-        cancel = theme.NeonButton("Cancel")
-        cancel.clicked.connect(self.reject)
+        close = theme.NeonButton("Close")
+        close.clicked.connect(self.reject)
         self.save_button = theme.NeonButton("Save", primary=True)
         self.save_button.clicked.connect(self._save)
         footer = QHBoxLayout()
         footer.setSpacing(10)
         footer.addWidget(self.status, 1)
         footer.addWidget(defaults)
-        footer.addWidget(cancel)
+        footer.addWidget(close)
         footer.addWidget(self.save_button)
 
         self.body.setSpacing(16)
@@ -455,7 +482,13 @@ class SettingsWindow(theme.NeonDialog):
     def _display_page(self) -> QWidget:
         page, layout = self._page("Display", "How she sits on your desktop. These apply right away when you save.")
         self._row(layout, "Size", "Her height on the screen.", self._spin("character_height", 10, " px"))
-        self._row(layout, "Always on top", "Stay above other windows.", self._toggle("always_on_top"))
+        self._row(
+            layout,
+            "Show her",
+            "Overlay: right on your desktop. Window: in a small window like this one, which you can minimize.",
+            self._segments("window_mode", {"Overlay": "overlay", "Window": "window"}),
+        )
+        self._row(layout, "Always on top", "Capri stays above other windows.", self._toggle("always_on_top"))
         self._row(layout, "Reply details", "Speed, or the cost with Claude, under each reply.", self._toggle("show_stats"))
         self._row(layout, "Speech bubble", "Hide the bubble this long after she's done talking.", self._spin("bubble_seconds", 5, " s"))
         advanced = theme.NeonButton("Open file")
@@ -549,9 +582,16 @@ class SettingsWindow(theme.NeonDialog):
             self._show_status(text, theme.ACCENT)
             return
         change = self.change()
-        self._loading = True  # nothing left unsaved: closing needs no question
-        self.accept()
         self.saved.emit(change)
+        # The window stays open; what was just saved is the new starting point.
+        self.original = replace(change.settings)
+        self.baseline = self.values()
+        if change.claude_key is not None:
+            self.claude_key.reset(bool(change.claude_key))
+        if change.brave_key is not None:
+            self.brave_key.reset(bool(change.brave_key))
+        self._refresh()
+        self._show_status("Saved.", theme.CYAN)
 
     def reject(self) -> None:
         if not self._loading and self.save_button.isEnabled():

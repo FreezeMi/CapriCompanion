@@ -25,7 +25,8 @@ class Settings:
     max_reply_tokens: int = 320
     temperature: float = 0.7
     character_height: int = 340  # in screen pixels
-    always_on_top: bool = True
+    always_on_top: bool = True  # Capri stays above other windows
+    window_mode: str = "overlay"  # "overlay": on the desktop itself; "window": in a framed window
     show_stats: bool = True  # show reply speed under each reply
     bubble_seconds: int = 45  # hide the speech bubble after this long
     voice_enabled: bool = True  # speak replies out loud
@@ -73,6 +74,7 @@ CHOICES = {
     "brain": ("local", "claude"),
     "claude_model": ("claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"),
     "claude_search": ("globe", "auto"),
+    "window_mode": ("overlay", "window"),
 }
 
 # Room kept free in the context for the personality, the rules and the reply.
