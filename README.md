@@ -279,6 +279,7 @@ Right-click her, choose **Open settings…**, edit, save, then choose **Restart*
 |---|---|
 | `companion/` | The app's source code (Python) |
 | `tests/` | Unit tests |
+| `LICENSE` | MIT License for the code |
 | `personality.txt`, `settings.json` | Yours to edit; created on the first start and not tracked by Git |
 | `data/` | Your encrypted conversation and keys, window position and the engine log (not tracked) |
 | `engine/`, `models/`, `.venv/` | Downloaded by Install.cmd (`models/voice/` is the voice) |
@@ -315,3 +316,10 @@ Run the tests with:
 ```
 
 Run with a console for error messages: `.venv\Scripts\python.exe -m companion`.
+
+## License
+
+The code is under the [MIT License](LICENSE). That covers the code only: the
+Capri character and her name belong to their owners, the Exo 2 font keeps its own
+license (see `assets/fonts/exo2/`), and the models and engine that Install.cmd
+downloads come under their own licenses.
